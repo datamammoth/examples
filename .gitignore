@@ -1,0 +1,8 @@
+node_modules/
+__pycache__/
+vendor/
+.env
+dist/
+target/
+bin/
+obj/
