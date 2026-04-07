@@ -1,0 +1,93 @@
+---
+# Ansible playbook to configure firewall rules on a DataMammoth server via API.
+#
+# Usage:
+#   export DM_API_KEY="dm_live_..."
+#   ansible-playbook setup_firewall.yml -e server_id=srv_abc123
+#
+# Variables:
+#   server_id:        Server ID to configure
+#   allowed_ssh_cidr: CIDR range allowed for SSH (default: your IP)
+
+- name: Configure DataMammoth Server Firewall
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    dm_api_key: "{{ lookup('env', 'DM_API_KEY') }}"
+    dm_base_url: "https://app.datamammoth.com/api/v2"
+    server_id: ""
+    allowed_ssh_cidr: "0.0.0.0/0"
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - dm_api_key | length > 0
+          - server_id | length > 0
+        fail_msg: "Set DM_API_KEY and provide server_id"
+
+    - name: Get current firewall rules
+      ansible.builtin.uri:
+        url: "{{ dm_base_url }}/servers/{{ server_id }}/firewall"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ dm_api_key }}"
+        status_code: 200
+      register: current_firewall
+
+    - name: Display current rules
+      ansible.builtin.debug:
+        msg: "Current rules: {{ current_firewall.json.data | default([]) }}"
+
+    - name: Apply standard web server firewall rules
+      ansible.builtin.uri:
+        url: "{{ dm_base_url }}/servers/{{ server_id }}/firewall"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ dm_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          rules:
+            - protocol: tcp
+              port: "22"
+              source: "{{ allowed_ssh_cidr }}"
+              action: allow
+              comment: "SSH access"
+            - protocol: tcp
+              port: "80"
+              source: "0.0.0.0/0"
+              action: allow
+              comment: "HTTP"
+            - protocol: tcp
+              port: "443"
+              source: "0.0.0.0/0"
+              action: allow
+              comment: "HTTPS"
+            - protocol: icmp
+              source: "0.0.0.0/0"
+              action: allow
+              comment: "Ping"
+        status_code: [200, 201]
+      register: update_result
+
+    - name: Display updated firewall
+      ansible.builtin.debug:
+        msg: |
+          Firewall updated for server {{ server_id }}
+          Rules applied: {{ update_result.json.data | length | default(0) }}
+
+    - name: Verify firewall is active
+      ansible.builtin.uri:
+        url: "{{ dm_base_url }}/servers/{{ server_id }}/firewall"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ dm_api_key }}"
+        status_code: 200
+      register: verify_result
+
+    - name: Confirm rules
+      ansible.builtin.debug:
+        msg: "Firewall verified with {{ verify_result.json.data | length | default(0) }} rules"

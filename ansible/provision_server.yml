@@ -1,0 +1,125 @@
+---
+# Ansible playbook to provision a DataMammoth VPS via the API.
+#
+# Usage:
+#   export DM_API_KEY="dm_live_..."
+#   ansible-playbook provision_server.yml
+#
+# Variables (override with -e):
+#   product_id:  Hosting product ID
+#   zone_id:     Zone / region ID
+#   image_id:    OS image ID
+#   hostname:    Server hostname
+#   label:       Display label
+
+- name: Provision a DataMammoth VPS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    dm_api_key: "{{ lookup('env', 'DM_API_KEY') }}"
+    dm_base_url: "https://app.datamammoth.com/api/v2"
+    product_id: "prod_vps_4core"
+    zone_id: "zone_eu_1"
+    image_id: "ubuntu-24.04"
+    hostname: "ansible-demo.example.com"
+    label: "Ansible Demo Server"
+
+  tasks:
+    - name: Validate API key is set
+      ansible.builtin.assert:
+        that: dm_api_key | length > 0
+        fail_msg: "Set the DM_API_KEY environment variable"
+
+    - name: Create server via DataMammoth API
+      ansible.builtin.uri:
+        url: "{{ dm_base_url }}/servers"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ dm_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          product_id: "{{ product_id }}"
+          zone_id: "{{ zone_id }}"
+          image_id: "{{ image_id }}"
+          hostname: "{{ hostname }}"
+          label: "{{ label }}"
+        status_code: [200, 201, 202]
+      register: create_result
+
+    - name: Extract task ID
+      ansible.builtin.set_fact:
+        task_id: "{{ create_result.json.data.task_id | default(create_result.json.task_id) }}"
+
+    - name: Display task ID
+      ansible.builtin.debug:
+        msg: "Provisioning task: {{ task_id }}"
+
+    - name: Wait for provisioning to complete
+      ansible.builtin.uri:
+        url: "{{ dm_base_url }}/tasks/{{ task_id }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ dm_api_key }}"
+        status_code: 200
+      register: task_result
+      until: task_result.json.data.status in ['completed', 'failed']
+      retries: 60
+      delay: 5
+
+    - name: Check provisioning result
+      ansible.builtin.assert:
+        that: task_result.json.data.status == 'completed'
+        fail_msg: "Provisioning failed: {{ task_result.json.data.error | default('unknown') }}"
+
+    - name: Extract server details
+      ansible.builtin.set_fact:
+        server_id: "{{ task_result.json.data.result.server_id }}"
+        server_ip: "{{ task_result.json.data.result.ip_address }}"
+
+    - name: Display server info
+      ansible.builtin.debug:
+        msg: |
+          Server provisioned successfully!
+            ID: {{ server_id }}
+            IP: {{ server_ip }}
+            Hostname: {{ hostname }}
+
+    - name: Add new server to in-memory inventory
+      ansible.builtin.add_host:
+        name: "{{ server_ip }}"
+        groups: new_servers
+        ansible_user: root
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+
+- name: Configure the new server
+  hosts: new_servers
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Wait for SSH to become available
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        timeout: 300
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install common packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - wget
+          - git
+          - htop
+          - ufw
+        state: present
+
+    - name: Display success
+      ansible.builtin.debug:
+        msg: "Server {{ inventory_hostname }} is configured and ready!"
